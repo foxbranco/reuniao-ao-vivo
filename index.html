@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reunião ao Vivo</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#f4f6f4;color:#182522;font-family:Arial,sans-serif}
+header{background:#173b35;color:white;padding:22px}
+main{max-width:760px;margin:auto;padding:16px;display:grid;gap:14px}
+.card{background:white;padding:18px;border:1px solid #dce4df;border-radius:14px}
+button{padding:12px 15px;border:0;border-radius:9px;font-size:15px;cursor:pointer;margin:3px}
+.primary{background:#176b55;color:white}
+.danger{background:#f8e8e5;color:#8d2f22}
+.secondary{background:#e7eeea;color:#173b35}
+textarea,input{width:100%;padding:12px;border:1px solid #cbd7d0;border-radius:9px;font:inherit}
+textarea{min-height:150px}
+.status{color:#53645e;font-size:14px;line-height:1.5}
+.summary{white-space:pre-wrap;line-height:1.5}
+small{color:#596861;line-height:1.5}
+button:disabled{opacity:.55;cursor:not-allowed}
+</style>
+</head>
+<body>
+<header>
+<h1>🎙️ Reunião ao Vivo</h1>
+<p>Transcreva ou escreva os assuntos da reunião e envie para gerar a ata por e-mail.</p>
+</header>
+
+<main>
+<section class="card">
+<h2>1. Captura da reunião</h2>
+<button id="start" class="primary">▶ Iniciar transcrição</button>
+<button id="stop" class="danger">✉ Enviar</button>
+<p id="status" class="status">Pronto. Inicie a transcrição ou escreva o texto manualmente na caixa abaixo.</p>
+<small>O botão Enviar encerra o microfone, se estiver ativo, e envia o texto preenchido ao n8n. Avise os participantes e obtenha autorização antes de gravar.</small>
+</section>
+
+<section class="card">
+<h2>2. Transcrição ou relato da reunião</h2>
+<textarea id="transcript" placeholder="A transcrição aparecerá aqui. Você também pode escrever ou colar diretamente o que aconteceu na reunião..."></textarea>
+<button id="clear" class="secondary">Limpar texto</button>
+<button id="copy" class="secondary">Copiar texto</button>
+</section>
+
+<section class="card">
+<h2>3. Resumo preliminar (opcional)</h2>
+<button id="summarize" class="primary">Gerar resumo simplificado</button>
+<div id="summary" class="summary">O resumo aparecerá aqui.</div>
+<button id="copySummary" class="secondary">Copiar resumo</button>
+<small>O envio ao n8n usa o texto da transcrição/relato. O n8n e a IA gerarão a ata padrão e o e-mail.</small>
+</section>
+</main>
+
+<script>
+(() => {
+const $ = id => document.getElementById(id);
+const transcript = $('transcript');
+const status = $('status');
+const startBtn = $('start');
+const sendBtn = $('stop');
+const summaryEl = $('summary');
+const webhookURL = 'https://munchkin-negotiate-parsnip.ngrok-free.dev/webhook-test/reuniao-ia';
+const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognition = null;
+let listening = false;
+let finalText = '';
+let sendWhenFinished = false;
+let sending = false;
+
+function makeSummary(text) {
+  const sentences = text.split(/(?<=[.!?])\s+|\n+/).map(s => s.trim()).filter(Boolean);
+  const taskWords = /\b(vamos|deve|deverá|precisa|responsável|prazo|entregar|enviar|verificar|providenciar|decidimos|decidiu|tarefa|combinar)\b/i;
+  const points = [...new Set(sentences)].slice(0, 6);
+  const tasks = [...new Set(sentences.filter(s => taskWords.test(s)))];
+  return 'RESUMO PRELIMINAR\n\nPontos principais:\n' +
+    (points.length ? points.map(s => '• ' + s).join('\n') : '• Nenhum ponto identificado.') +
+    '\n\nPossíveis decisões e tarefas:\n' +
+    (tasks.length ? tasks.slice(0, 10).map(s => '• ' + s).join('\n') : '• Não identificadas claramente.') +
+    '\n\nRevise nomes, decisões, responsáveis e prazos.';
+}
+
+async function sendToN8n() {
+  if (sending) return;
+  const text = transcript.value.trim();
+  if (!text) {
+    status.textContent = 'Digite ou transcreva o relato da reunião antes de enviar.';
+    transcript.focus();
+    return;
+  }
+  sending = true;
+  sendBtn.disabled = true;
+  startBtn.disabled = true;
+  status.textContent = 'Enviando o texto ao n8n...';
+  if (!summaryEl.textContent.trim() || summaryEl.textContent === 'O resumo aparecerá aqui.') {
+    summaryEl.textContent = makeSummary(text);
+  }
+  const payload = new URLSearchParams({
+    transcricao: text,
+    resumo: summaryEl.textContent,
+    data: new Date().toLocaleString('pt-BR')
+  });
+  try {
+    await fetch(webhookURL, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+      body: payload.toString()
+    });
+    status.textContent = 'Solicitação enviada. Confira a execução do workflow no n8n e o e-mail gerado.';
+  } catch (error) {
+    status.textContent = 'Falha no envio. Verifique se o n8n está aberto e aguardando o teste.';
+  } finally {
+    sending = false;
+    sendBtn.disabled = false;
+    startBtn.disabled = !Recognition;
+  }
+}
+
+if (!Recognition) {
+  status.textContent = 'Reconhecimento de voz indisponível neste navegador. Você ainda pode escrever ou colar o relato e clicar em Enviar.';
+  startBtn.disabled = true;
+} else {
+  recognition = new Recognition();
+  recognition.lang = 'pt-BR';
+  recognition.continuous = true;
+  recognition.interimResults = true;
+  recognition.onstart = () => {
+    listening = true;
+    startBtn.disabled = true;
+    sendBtn.disabled = false;
+    status.textContent = 'Microfone ativo. Transcrição em andamento.';
+  };
+  recognition.onresult = event => {
+    let interim = '';
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const part = event.results[i][0].transcript;
+      if (event.results[i].isFinal) finalText += part.trim() + ' ';
+      else interim += part;
+    }
+    transcript.value = (finalText + (interim ? '\n' + interim : '')).trim();
+    transcript.scrollTop = transcript.scrollHeight;
+  };
+  recognition.onerror = event => {
+    status.textContent = 'Aviso do microfone: ' + event.error + '. Você ainda pode revisar o texto e clicar em Enviar.';
+  };
+  recognition.onend = async () => {
+    listening = false;
+    startBtn.disabled = false;
+    finalText = transcript.value.trim();
+    if (sendWhenFinished) {
+      sendWhenFinished = false;
+      await sendToN8n();
+    } else if (!sending) {
+      status.textContent = 'Transcrição encerrada. Revise o texto ou clique em Enviar.';
+    }
+  };
+  startBtn.addEventListener('click', () => {
+    finalText = transcript.value.trim();
+    if (finalText) finalText += ' ';
+    try {
+      recognition.start();
+    } catch (error) {
+      status.textContent = 'A transcrição já está iniciada. Clique em Enviar quando terminar.';
+    }
+  });
+}
+
+sendBtn.addEventListener('click', async () => {
+  if (sending) return;
+  if (!transcript.value.trim()) {
+    status.textContent = 'Digite ou transcreva o relato da reunião antes de enviar.';
+    transcript.focus();
+    return;
+  }
+  if (recognition && listening) {
+    sendWhenFinished = true;
+    sendBtn.disabled = true;
+    status.textContent = 'Encerrando o microfone e preparando o envio...';
+    recognition.stop();
+  } else {
+    await sendToN8n();
+  }
+});
+
+$('summarize').addEventListener('click', () => {
+  const text = transcript.value.trim();
+  if (!text) {
+    status.textContent = 'Escreva ou transcreva o relato primeiro.';
+    return;
+  }
+  summaryEl.textContent = makeSummary(text);
+  status.textContent = 'Resumo preliminar gerado.';
+});
+
+$('clear').addEventListener('click', () => {
+  sendWhenFinished = false;
+  if (listening && recognition) recognition.stop();
+  transcript.value = '';
+  finalText = '';
+  summaryEl.textContent = 'O resumo aparecerá aqui.';
+  status.textContent = 'Texto limpo.';
+});
+
+$('copy').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(transcript.value);
+    status.textContent = 'Texto copiado.';
+  } catch (error) {
+    transcript.select();
+    status.textContent = 'Use Ctrl+C para copiar.';
+  }
+});
+
+$('copySummary').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(summaryEl.textContent);
+    status.textContent = 'Resumo copiado.';
+  } catch (error) {
+    status.textContent = 'Selecione o resumo e copie.';
+  }
+});
+})();
+</script>
+</body>
+</html>
